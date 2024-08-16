@@ -1,0 +1,156 @@
+---
+title: "EDA Project"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: 08/08/2024
+---
+
+```{r}
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(DataExplorer)
+library(lattice)
+library(caret)
+library(randomForest)
+library(tidyr)
+```
+
+```{r}
+# Load the dataset
+dataset <- read_excel("C:/Users/cheic/OneDrive/Desktop/dataset.xlsx")
+```
+
+Conduct EDA (Exploratory Data Analysis) to gain an understanding of the Data
+```{r}
+# Display the first few rows of the dataset
+head(dataset)
+
+# Check for missing values
+missing_values <- sapply(dataset, function(x) sum(is.na(x)))
+
+# Visualize missing values
+plot_missing(dataset)
+
+# Generate a report for the dataset
+create_report(dataset)
+```
+
+Interpretation:
+The dataset comprises 1,925 rows and 231 columns, detailing patient visit information, demographics, and various medical metrics. Key attributes include patient identifiers, age, gender, and disease groupings, along with numerous median, mean, minimum, maximum, and differential values for medical variables like albumin, arterial and venous blood gases, and various blood components. Summary statistics show that most patients are under 65, with a roughly equal distribution of disease groupings. Many medical measurements have missing or uniform values, suggesting potential data imputation or consistent patient characteristics. The dataset's complexity and size indicate its use for detailed medical analysis or predictive modeling.
+
+
+
+Preprocess the Data to prepare it for the ML Model
+```{r}
+# Check the balance of the target variable (assuming it's named 'ICU')
+if("ICU" %in% colnames(dataset)) {
+  target_balance <- table(dataset$ICU)
+  print(target_balance)
+  barplot(target_balance, main = "Target Variable Distribution", xlab = "ICU", ylab = "Frequency", col = "blue")
+} else {
+  cat("Target variable 'ICU' not found in the dataset.")
+}
+
+# Preprocess the data
+
+# Handle missing values
+# Impute missing values (using median for numeric and mode for categorical)
+for (col in colnames(dataset)) {
+  if (is.numeric(dataset[[col]])) {
+    dataset[[col]][is.na(dataset[[col]])] <- median(dataset[[col]], na.rm = TRUE)
+  } else {
+    dataset[[col]][is.na(dataset[[col]])] <- as.character(names(sort(table(dataset[[col]]), decreasing = TRUE))[1])
+  }
+}
+
+# Encode categorical variables
+dataset <- dataset %>%
+  mutate_if(is.character, as.factor)
+
+# Remove the 'PATIENT_VISIT_IDENTIFIER' column as it is not useful for prediction
+dataset <- dataset %>% select(-PATIENT_VISIT_IDENTIFIER)
+
+# Convert ICU to factor
+dataset$ICU <- as.factor(dataset$ICU)
+
+# Split the dataset into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(dataset$ICU, p = 0.8, list = FALSE, times = 1)
+trainData <- dataset[trainIndex, ]
+testData <- dataset[-trainIndex, ]
+
+# Ensure both training and testing sets have the same factor levels for ICU
+trainData$ICU <- factor(trainData$ICU, levels = levels(dataset$ICU))
+testData$ICU <- factor(testData$ICU, levels = levels(dataset$ICU))
+
+# Feature Selection using Recursive Feature Elimination (RFE)
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+results <- rfe(trainData[, -ncol(trainData)], trainData$ICU, sizes = c(1:10), rfeControl = control)
+selected_features <- predictors(results)
+
+# Use only selected features for training
+trainData_selected <- trainData[, c(selected_features, "ICU")]
+testData_selected <- testData[, c(selected_features, "ICU")]
+```
+
+Interpretation:
+The analysis checks the balance of the target variable 'ICU,' showing 1410 non-ICU and 515 ICU cases. The dataset undergoes preprocessing, including handling missing values via median/mode imputation and encoding categorical variables. The 'PATIENT_VISIT_IDENTIFIER' column is removed, and the dataset is split into training and testing sets. Recursive Feature Elimination (RFE) identifies key features, primarily related to respiratory rate, blood pressure, lactate levels, and other vital signs. The selected features, including age, gender, and disease groupings, are used to create refined training and testing datasets for further predictive modeling.
+
+
+Develop a few candidate ML models and pick the most promising one. 
+```{r}
+# Hyperparameter tuning using grid search
+
+# Grid for Random Forest
+rf_grid <- expand.grid(mtry = c(1:10))
+
+# Model 1: Random Forest with Hyperparameter Tuning
+model_rf <- train(ICU ~ ., data = trainData_selected, method = "rf", tuneGrid = rf_grid, trControl = trainControl(method = "cv", number = 5))
+predictions_rf <- predict(model_rf, newdata = testData_selected)
+
+# Ensure predictions and reference are factors with the same levels
+predictions_rf <- factor(predictions_rf, levels = levels(testData_selected$ICU))
+confusionMatrix(predictions_rf, testData_selected$ICU)
+
+# Grid for Support Vector Machine
+svm_grid <- expand.grid(sigma = c(0.01, 0.1, 0.5), C = c(1, 10, 100))
+
+# Model 2: Support Vector Machine with Hyperparameter Tuning
+model_svm <- train(ICU ~ ., data = trainData_selected, method = "svmRadial", tuneGrid = svm_grid, trControl = trainControl(method = "cv", number = 5))
+predictions_svm <- predict(model_svm, newdata = testData_selected)
+
+# Ensure predictions and reference are factors with the same levels
+predictions_svm <- factor(predictions_svm, levels = levels(testData_selected$ICU))
+confusionMatrix(predictions_svm, testData_selected$ICU)
+
+# Evaluate models
+results <- resamples(list(random_forest = model_rf, svm = model_svm))
+summary(results)
+bwplot(results)
+```
+
+Interpretation:
+Hyperparameter tuning for Random Forest and Support Vector Machine (SVM) models is conducted using grid search and cross-validation. The Random Forest model, tuned for mtry, achieves an accuracy of 85.97% with a Kappa of 0.603. The SVM model, tuned for sigma and C, attains an accuracy of 86.23% with a Kappa of 0.622. Both models exhibit similar performance, with the SVM slightly outperforming in balanced accuracy. The resampling summary confirms these results, showing the mean accuracy and Kappa values are comparable for both models, indicating robust model performance across different hyperparameters.
+
+
+Evaluate it based on a variety of metrics as well as analysing it’s performance (does it overtrain, can we improve it by changing our data preprocessing etc.)
+```{r}
+# Analyze overfitting
+# Check performance on training data
+train_predictions_rf <- predict(model_rf, newdata = trainData_selected)
+train_predictions_rf <- factor(train_predictions_rf, levels = levels(trainData_selected$ICU))
+confusionMatrix(train_predictions_rf, trainData_selected$ICU)
+
+# Check performance on test data
+test_predictions_rf <- predict(model_rf, newdata = testData_selected)
+test_predictions_rf <- factor(test_predictions_rf, levels = levels(testData_selected$ICU))
+confusionMatrix(test_predictions_rf, testData_selected$ICU)
+```
+
+Interpretation:
+The Random Forest model exhibits a high accuracy of 97.14% on the training data, with a Kappa of 0.9245, indicating excellent agreement. However, on the test data, the accuracy drops to 85.97% with a Kappa of 0.603, suggesting moderate agreement. The significant performance difference between training and test sets indicates overfitting, where the model performs exceptionally well on the training data but struggles to generalize to unseen test data. This discrepancy is further highlighted by the high sensitivity (1.000) on the training set compared to the lower sensitivity (0.961) and specificity (0.5825) on the test set.
+
